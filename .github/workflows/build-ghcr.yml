@@ -1,0 +1,84 @@
+name: Build image to GHCR
+
+# 仓库 https://github.com/a454735639-lab/sunpanel 是公开空仓库，默认分支 main。
+# 源码与 Dockerfile 都在根目录，无需 checkout 其它分支。
+#
+# 仅手动触发：首次 push 源码不会自动构建，也就不会过早定型 GHCR 包名。
+# 包名在「第一次成功运行本 workflow」时才创建，届时不可再改名。
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: 'GHCR 包名（不含 owner；首次构建后不可再改）'
+        required: true
+        default: 'sun-panel'
+        type: string
+      tag:
+        description: '镜像 tag'
+        required: true
+        default: 'latest'
+        type: string
+      platforms:
+        description: '构建平台（逗号分隔）'
+        required: true
+        default: 'linux/amd64,linux/arm64'
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ghcr-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Record source revision
+        run: |
+          echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "APP_VERSION=$(cut -d '|' -f 2 ./service/assets/version)" >> "$GITHUB_STEP_SUMMARY"
+          echo "PLATFORMS=${{ inputs.platforms }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compute lowercase image tag
+        # GHCR 只接受小写 owner 与包名；包名在本次构建首次创建后即定型。
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          NAME_LC=$(echo "${{ inputs.image_name }}" | tr '[:upper:]' '[:lower:]')
+          TAG="${{ inputs.tag }}"
+          echo "IMAGE_TAGS=ghcr.io/${OWNER_LC}/${NAME_LC}:${TAG}" >> "$GITHUB_ENV"
+          echo "Publishing ghcr.io/${OWNER_LC}/${NAME_LC}:${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Actions 内置令牌，不需要、也不应该把个人 PAT 配成 secret。
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ inputs.platforms }}
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE_TAGS }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
